@@ -3,8 +3,10 @@ from vk_api.longpoll import VkLongPoll, VkEventType
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 import sqlite3
 import random
+import os
 
-TOKEN = "vk1.a.9xrGf1juLhg_kWsgWGZ1nW6XVqQ-TrCZKZKR3rGt_S5rAB0lD8PzlQNdWvXzi6gqoj_jHhVt_L1rWWqhJuYlXNMK8x-28mlri_B1n0lIQWV5Nu9gZ6VJdzF4EErGfTmGqGfr6Spi8Tz90C1HLbouHsn7OBzyO2-DxOLDQWL1ZfZYupx3JF3GS0sdW691i2JUkVl2leBJmyHWo5zbF7Fdgw"
+TOKEN = os.getenv("VK_TOKEN")
+
 
 ADMINS = [695637048]  # твой ID
 
