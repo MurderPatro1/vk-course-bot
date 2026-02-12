@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import uuid
@@ -12,6 +13,8 @@ from fastapi.responses import PlainTextResponse
 from vk_api.upload import VkUpload
 
 app = FastAPI()
+logger = logging.getLogger("vk_sales_bot")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 # =============================
 # Переменные окружения
@@ -89,6 +92,7 @@ def update_payment_status(payment_label: str, status: str):
 
 def send_message(user_id: int, message: str, keyboard: dict | None = None, attachment: str | None = None):
     if not vk:
+        logger.warning("VK_TOKEN is not set, cannot send message")
         return
 
     params = {
@@ -101,7 +105,10 @@ def send_message(user_id: int, message: str, keyboard: dict | None = None, attac
     if keyboard:
         params["keyboard"] = json.dumps(keyboard, ensure_ascii=False)
 
-    vk.messages.send(**params)
+    try:
+        vk.messages.send(**params)
+    except Exception as exc:
+        logger.exception("Failed to send VK message to user_id=%s: %s", user_id, exc)
 
 
 def make_main_keyboard() -> dict:
@@ -209,13 +216,16 @@ def deliver_course(user_id: int, course_id: int):
     _, title, _description, _price, pdf_path = course
     file_path = Path(pdf_path)
 
-    if vk_session and file_path.exists():
-        upload = VkUpload(vk_session)
-        doc = upload.document_message(str(file_path), peer_id=user_id)
-        attachment = f"doc{doc['doc']['owner_id']}_{doc['doc']['id']}"
-        send_message(user_id, f"✅ Оплата прошла успешно! Отправляю курс: {title}", attachment=attachment)
-    else:
-        send_message(user_id, f"✅ Оплата прошла успешно! Курс '{title}' будет отправлен менеджером.")
+    try:
+        if vk_session and file_path.exists():
+            upload = VkUpload(vk_session)
+            doc = upload.document_message(str(file_path), peer_id=user_id)
+            attachment = f"doc{doc['doc']['owner_id']}_{doc['doc']['id']}"
+            send_message(user_id, f"✅ Оплата прошла успешно! Отправляю курс: {title}", attachment=attachment)
+        else:
+            send_message(user_id, f"✅ Оплата прошла успешно! Курс '{title}' будет отправлен менеджером.")
+    except Exception as exc:
+        logger.exception("Failed to deliver course_id=%s to user_id=%s: %s", course_id, user_id, exc)
 
 
 # =============================
@@ -230,78 +240,90 @@ async def healthcheck():
 
 @app.post("/vk")
 async def vk_webhook(request: Request):
-    data = await request.json()
-
-    if data.get("type") == "confirmation":
-        return PlainTextResponse(VK_CONFIRMATION_TOKEN)
-
-    if data.get("type") != "message_new":
+    try:
+        data = await request.json()
+    except Exception:
+        logger.exception("Invalid JSON in /vk webhook")
         return PlainTextResponse("ok")
 
-    message = data.get("object", {}).get("message", {})
-    user_id = message.get("from_id")
-    if not user_id:
-        return PlainTextResponse("ok")
+    try:
+        event_type = data.get("type")
 
-    payload_raw = message.get("payload")
-    text = (message.get("text") or "").strip().lower()
+        if event_type == "confirmation":
+            return PlainTextResponse(VK_CONFIRMATION_TOKEN)
 
-    cmd = None
-    course_id = None
-    if payload_raw:
-        try:
-            payload = json.loads(payload_raw)
-            cmd = payload.get("cmd")
-            course_id = payload.get("course_id")
-        except json.JSONDecodeError:
-            cmd = None
-
-    if cmd == "buy" and course_id:
-        course = get_course(int(course_id))
-        if not course:
-            send_message(user_id, "Курс не найден.", keyboard=make_main_keyboard())
+        if event_type != "message_new":
             return PlainTextResponse("ok")
 
-        c_id, title, _description, price, _pdf_path = course
-
-        if not YOOMONEY_RECEIVER:
-            send_message(user_id, "Оплата временно недоступна. Не настроен кошелёк ЮMoney.", keyboard=make_main_keyboard())
+        obj = data.get("object") or {}
+        message = obj.get("message") or obj
+        user_id = message.get("from_id") or message.get("user_id") or obj.get("user_id")
+        if not user_id:
+            logger.warning("Cannot detect user_id in VK payload: %s", data)
             return PlainTextResponse("ok")
 
-        payment_label, payment_url = create_yoomoney_payment_url(user_id=user_id, course_id=c_id, amount=price, title=title)
-        save_payment(user_id=user_id, course_id=c_id, payment_label=payment_label)
+        payload_raw = message.get("payload")
+        text = (message.get("text") or "").strip().lower()
 
-        pay_keyboard = {
-            "one_time": False,
-            "buttons": [
-                [{"action": {"type": "open_link", "label": "💳 Оплатить", "link": payment_url}}],
-                [{"action": {"type": "text", "label": "Каталог", "payload": '{"cmd":"catalog"}'}, "color": "primary"}],
-            ],
-        }
-        send_message(
-            user_id,
-            f"Вы выбрали курс '{title}' за {price} ₽. Нажмите кнопку ниже для оплаты. После оплаты курс придёт автоматически.",
-            keyboard=pay_keyboard,
-        )
+        cmd = None
+        course_id = None
+        if payload_raw:
+            try:
+                payload = payload_raw if isinstance(payload_raw, dict) else json.loads(payload_raw)
+                cmd = payload.get("cmd")
+                course_id = payload.get("course_id")
+            except Exception:
+                logger.exception("Failed to parse VK payload: %s", payload_raw)
+
+        if cmd == "buy" and course_id:
+            course = get_course(int(course_id))
+            if not course:
+                send_message(user_id, "Курс не найден.", keyboard=make_main_keyboard())
+                return PlainTextResponse("ok")
+
+            c_id, title, _description, price, _pdf_path = course
+
+            if not YOOMONEY_RECEIVER:
+                send_message(user_id, "Оплата временно недоступна. Не настроен кошелёк ЮMoney.", keyboard=make_main_keyboard())
+                return PlainTextResponse("ok")
+
+            payment_label, payment_url = create_yoomoney_payment_url(user_id=user_id, course_id=c_id, amount=price, title=title)
+            save_payment(user_id=user_id, course_id=c_id, payment_label=payment_label)
+
+            pay_keyboard = {
+                "one_time": False,
+                "buttons": [
+                    [{"action": {"type": "open_link", "label": "💳 Оплатить", "link": payment_url}}],
+                    [{"action": {"type": "text", "label": "Каталог", "payload": '{"cmd":"catalog"}'}, "color": "primary"}],
+                ],
+            }
+            send_message(
+                user_id,
+                f"Вы выбрали курс '{title}' за {price} ₽. Нажмите кнопку ниже для оплаты. После оплаты курс придёт автоматически.",
+                keyboard=pay_keyboard,
+            )
+            return PlainTextResponse("ok")
+
+        if cmd == "catalog" or text in {"каталог", "старт", "начать", "меню"}:
+            send_message(user_id, format_courses_message(), keyboard=make_courses_keyboard())
+            return PlainTextResponse("ok")
+
+        if cmd == "help" or text in {"помощь", "help"}:
+            send_message(
+                user_id,
+                "Это бот продаж курсов. Всё работает кнопками:\n"
+                "1) Нажмите 'Каталог'\n"
+                "2) Нажмите кнопку 'Купить' у нужного курса\n"
+                "3) Оплатите в ЮMoney — курс придёт автоматически.",
+                keyboard=make_main_keyboard(),
+            )
+            return PlainTextResponse("ok")
+
+        send_message(user_id, "Добро пожаловать! Нажмите кнопку ниже.", keyboard=make_main_keyboard())
         return PlainTextResponse("ok")
-
-    if cmd == "catalog" or text in {"каталог", "старт", "начать", "меню"}:
-        send_message(user_id, format_courses_message(), keyboard=make_courses_keyboard())
+    except Exception as exc:
+        logger.exception("Unhandled error in /vk webhook: %s", exc)
         return PlainTextResponse("ok")
-
-    if cmd == "help" or text in {"помощь", "help"}:
-        send_message(
-            user_id,
-            "Это бот продаж курсов. Всё работает кнопками:\n"
-            "1) Нажмите 'Каталог'\n"
-            "2) Нажмите кнопку 'Купить' у нужного курса\n"
-            "3) Оплатите в ЮMoney — курс придёт автоматически.",
-            keyboard=make_main_keyboard(),
-        )
-        return PlainTextResponse("ok")
-
-    send_message(user_id, "Добро пожаловать! Нажмите кнопку ниже.", keyboard=make_main_keyboard())
-    return PlainTextResponse("ok")
 
 
 # =============================
@@ -314,6 +336,7 @@ async def yoomoney_webhook(request: Request):
     form = dict(await request.form())
 
     if not verify_yoomoney_notification(form):
+        logger.warning("Invalid YuMoney notification: %s", form)
         return PlainTextResponse("invalid", status_code=400)
 
     payment_label = form.get("label", "")
