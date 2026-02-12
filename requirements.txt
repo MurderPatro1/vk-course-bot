@@ -1,1 +1,5 @@
 vk-api
+fastapi
+uvicorn
+yookassa
+python-multipart
