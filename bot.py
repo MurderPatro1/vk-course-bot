@@ -243,9 +243,9 @@ async def vk_webhook(request: Request):
     if data.get("type") == "confirmation":
         return PlainTextResponse(VK_CONFIRMATION_TOKEN)
 
-    if VK_CALLBACK_SECRET and data.get("secret") != VK_CALLBACK_SECRET:
-        logger.warning("VK callback secret mismatch")
-        return PlainTextResponse("ok")
+    #if VK_CALLBACK_SECRET and data.get("secret") != VK_CALLBACK_SECRET:
+       # logger.warning("VK callback secret mismatch")
+       # return PlainTextResponse("ok")
 
     if data.get("type") != "message_new":
         return PlainTextResponse("ok")
@@ -341,3 +341,4 @@ async def yoomoney_webhook(request: Request):
     update_payment_status(payment_label, "paid")
     deliver_course(user_id=int(user_id), course_id=int(course_id))
     return PlainTextResponse("ok")
+
