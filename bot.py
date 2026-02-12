@@ -4,6 +4,8 @@ import sqlite3
 from fastapi import FastAPI, Request
 from yookassa import Configuration, Payment
 import vk_api
+import requests
+import base64
 
 app = FastAPI()
 
@@ -57,6 +59,41 @@ def update_payment_status(payment_id, status):
     conn.commit()
     conn.close()
 
+def create_payment(user_id, amount, description):
+    shop_id = os.getenv("YOOKASSA_SHOP_ID")
+    secret_key = os.getenv("YOOKASSA_SECRET_KEY")
+
+    auth = base64.b64encode(f"{shop_id}:{secret_key}".encode()).decode()
+
+    headers = {
+        "Authorization": f"Basic {auth}",
+        "Content-Type": "application/json",
+        "Idempotence-Key": str(user_id)
+    }
+
+    data = {
+        "amount": {
+            "value": f"{amount}.00",
+            "currency": "RUB"
+        },
+        "confirmation": {
+            "type": "redirect",
+            "return_url": "https://vk.com"
+        },
+        "capture": True,
+        "description": description,
+        "metadata": {
+            "user_id": user_id
+        }
+    }
+
+    response = requests.post(
+        "https://api.yookassa.ru/v3/payments",
+        json=data,
+        headers=headers
+    )
+
+    return response.json()
 
 # =============================
 # VK Callback
@@ -79,6 +116,18 @@ async def vk_webhook(request: Request):
     if data.get("type") == "message_new":
         return Response(content="ok", media_type="text/plain")
 
+    if text.lower() == "купить":
+    payment = create_payment(
+        user_id=user_id,
+        amount=1990,
+        description="Курс Киберслед"
+    )
+
+    confirmation_url = payment["confirmation"]["confirmation_url"]
+
+    send_message(user_id, f"Для оплаты перейдите по ссылке:\n{confirmation_url}")
+
+
     return Response(content="ok", media_type="text/plain")
 
 
@@ -92,13 +141,21 @@ async def yookassa_webhook(request: Request):
     data = await request.json()
 
     if data["event"] == "payment.succeeded":
-        payment_id = data["object"]["id"]
+        payment_object = data["object"]
+        user_id = payment_object["metadata"]["user_id"]
 
-        update_payment_status(payment_id, "succeeded")
+        pdf_path = "cybertrail.pdf"  # твой файл
 
-        # тут позже добавим выдачу PDF
+        upload = VkUpload(vk_session)
+        doc = upload.document_message(pdf_path, peer_id=user_id)
 
-    return {"status": "ok"}
+        attachment = f"doc{doc['doc']['owner_id']}_{doc['doc']['id']}"
+
+        send_message(user_id, "Оплата прошла успешно! Вот ваш курс:", attachment=attachment)
+
+    return PlainTextResponse("ok")
+
+
 
 
 
