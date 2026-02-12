@@ -62,57 +62,25 @@ def update_payment_status(payment_id, status):
 # VK Callback
 # =============================
 
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import Response
 
 @app.post("/vk")
 async def vk_webhook(request: Request):
     data = await request.json()
 
+    # Подтверждение сервера VK
     if data.get("type") == "confirmation":
-        # ВК требует plain text, а не JSON
-        return PlainTextResponse("5bb3d654")
+        return Response(
+            content="5bb3d654",
+            media_type="text/plain"
+        )
 
-    # Дальше обработка сообщений
+    # Новое сообщение
     if data.get("type") == "message_new":
-        user_id = data["object"]["message"]["from_id"]
-        text = data["object"]["message"]["text"]
+        return Response(content="ok", media_type="text/plain")
 
-        # Твой код обработки сообщений
+    return Response(content="ok", media_type="text/plain")
 
-    return PlainTextResponse("ok")
-
-    if data["type"] == "message_new":
-        user_id = data["object"]["message"]["from_id"]
-        text = data["object"]["message"]["text"]
-
-        if text.startswith("Купить"):
-            course_id = int(text.split()[-1])
-            course = get_course(course_id)
-
-            payment = Payment.create({
-                "amount": {
-                    "value": str(course[2]),
-                    "currency": "RUB"
-                },
-                "confirmation": {
-                    "type": "redirect",
-                    "return_url": "https://vk.com"
-                },
-                "capture": True,
-                "description": f"Покупка курса {course[1]}"
-            }, uuid.uuid4())
-
-            save_payment(user_id, course_id, payment.id)
-
-            vk.messages.send(
-                user_id=user_id,
-                message=f"Оплатите курс по ссылке:\n{payment.confirmation.confirmation_url}",
-                random_id=0
-            )
-
-        return "ok"
-
-    return "ok"
 
 
 # =============================
@@ -131,5 +99,6 @@ async def yookassa_webhook(request: Request):
         # тут позже добавим выдачу PDF
 
     return {"status": "ok"}
+
 
 
