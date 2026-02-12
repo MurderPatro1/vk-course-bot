@@ -62,12 +62,14 @@ def update_payment_status(payment_id, status):
 # VK Callback
 # =============================
 
+from fastapi.responses import PlainTextResponse
+
 @app.post("/vk")
 async def vk_webhook(request: Request):
     data = await request.json()
 
     if data["type"] == "confirmation":
-        return VK_CONFIRMATION_TOKEN
+        return PlainTextResponse(VK_CONFIRMATION_TOKEN)
 
     if data["type"] == "message_new":
         user_id = data["object"]["message"]["from_id"]
@@ -119,3 +121,4 @@ async def yookassa_webhook(request: Request):
         # тут позже добавим выдачу PDF
 
     return {"status": "ok"}
+
