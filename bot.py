@@ -1,233 +1,121 @@
-import vk_api
-from vk_api.longpoll import VkLongPoll, VkEventType
-from vk_api.keyboard import VkKeyboard, VkKeyboardColor
-import sqlite3
-import random
 import os
+import uuid
+import sqlite3
+from fastapi import FastAPI, Request
+from yookassa import Configuration, Payment
+import vk_api
 
-TOKEN = os.getenv("VK_TOKEN")
+app = FastAPI()
 
+# =============================
+# Переменные окружения
+# =============================
 
-ADMINS = [695637048]  # твой ID
+VK_TOKEN = os.getenv("VK_TOKEN")
+SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")
+SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")
+VK_CONFIRMATION_TOKEN = os.getenv("VK_CONFIRMATION_TOKEN")
 
-vk_session = vk_api.VkApi(token=TOKEN)
+Configuration.account_id = SHOP_ID
+Configuration.secret_key = SECRET_KEY
+
+vk_session = vk_api.VkApi(token=VK_TOKEN)
 vk = vk_session.get_api()
-longpoll = VkLongPoll(vk_session)
 
 
-# =========================
+# =============================
 # Работа с БД
-# =========================
+# =============================
 
-def get_courses():
+def get_course(course_id):
     conn = sqlite3.connect("courses.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT id, title, price, description, pdf_path FROM courses")
-    courses = cursor.fetchall()
+    cursor.execute("SELECT id, title, price, pdf_path FROM courses WHERE id=?", (course_id,))
+    course = cursor.fetchone()
     conn.close()
-    return courses
+    return course
 
 
-def update_price(course_id, new_price):
+def save_payment(user_id, course_id, payment_id):
     conn = sqlite3.connect("courses.db")
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE courses SET price = ? WHERE id = ?",
-        (new_price, course_id)
+        "INSERT INTO payments (user_id, course_id, payment_id, status) VALUES (?, ?, ?, ?)",
+        (user_id, course_id, payment_id, "pending")
     )
     conn.commit()
     conn.close()
 
 
-# =========================
-# Клавиатуры
-# =========================
-
-def main_keyboard():
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button("📚 Каталог", VkKeyboardColor.PRIMARY)
-    return keyboard
-
-
-def catalog_keyboard(courses):
-    keyboard = VkKeyboard(one_time=False)
-
-    for course in courses:
-        keyboard.add_button(f"{course[1]}", VkKeyboardColor.PRIMARY)
-        keyboard.add_line()
-
-    keyboard.add_button("🏠 В меню", VkKeyboardColor.SECONDARY)
-    return keyboard
+def update_payment_status(payment_id, status):
+    conn = sqlite3.connect("courses.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE payments SET status=? WHERE payment_id=?",
+        (status, payment_id)
+    )
+    conn.commit()
+    conn.close()
 
 
-def course_keyboard(course_id):
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button(f"🛒 Купить {course_id}", VkKeyboardColor.POSITIVE)
-    keyboard.add_line()
-    keyboard.add_button("⬅ Назад", VkKeyboardColor.SECONDARY)
-    return keyboard
+# =============================
+# VK Callback
+# =============================
 
+@app.post("/vk")
+async def vk_webhook(request: Request):
+    data = await request.json()
 
-def admin_keyboard():
-    keyboard = VkKeyboard(one_time=False)
-    keyboard.add_button("✏ Изменить цену", VkKeyboardColor.PRIMARY)
-    keyboard.add_line()
-    keyboard.add_button("🏠 В меню", VkKeyboardColor.SECONDARY)
-    return keyboard
+    if data["type"] == "confirmation":
+        return VK_CONFIRMATION_TOKEN
 
+    if data["type"] == "message_new":
+        user_id = data["object"]["message"]["from_id"]
+        text = data["object"]["message"]["text"]
 
-# =========================
-# Бот
-# =========================
+        if text.startswith("Купить"):
+            course_id = int(text.split()[-1])
+            course = get_course(course_id)
 
-print("Бот запущен")
+            payment = Payment.create({
+                "amount": {
+                    "value": str(course[2]),
+                    "currency": "RUB"
+                },
+                "confirmation": {
+                    "type": "redirect",
+                    "return_url": "https://vk.com"
+                },
+                "capture": True,
+                "description": f"Покупка курса {course[1]}"
+            }, uuid.uuid4())
 
-for event in longpoll.listen():
-    if event.type == VkEventType.MESSAGE_NEW and event.to_me:
-
-        user_id = event.user_id
-        text = event.text.strip()
-
-        # =========================
-        # Главное меню
-        # =========================
-
-        if text.lower() in ["начать", "start", "🏠 в меню"]:
-            vk.messages.send(
-                user_id=user_id,
-                message="Добро пожаловать!",
-                keyboard=main_keyboard().get_keyboard(),
-                random_id=random.randint(1, 999999)
-            )
-
-        # =========================
-        # Каталог
-        # =========================
-
-        elif text == "📚 Каталог":
-            courses = get_courses()
+            save_payment(user_id, course_id, payment.id)
 
             vk.messages.send(
                 user_id=user_id,
-                message="📚 Наши курсы:",
-                keyboard=catalog_keyboard(courses).get_keyboard(),
-                random_id=random.randint(1, 999999)
+                message=f"Оплатите курс по ссылке:\n{payment.confirmation.confirmation_url}",
+                random_id=0
             )
 
-        # =========================
-        # Назад
-        # =========================
+        return "ok"
 
-        elif text == "⬅ Назад":
-            courses = get_courses()
+    return "ok"
 
-            vk.messages.send(
-                user_id=user_id,
-                message="📚 Каталог:",
-                keyboard=catalog_keyboard(courses).get_keyboard(),
-                random_id=random.randint(1, 999999)
-            )
 
-        # =========================
-        # Админ вход
-        # =========================
+# =============================
+# ЮKassa webhook
+# =============================
 
-        elif text.lower() == "/admin":
-            if user_id in ADMINS:
-                vk.messages.send(
-                    user_id=user_id,
-                    message="🔐 Админ-панель",
-                    keyboard=admin_keyboard().get_keyboard(),
-                    random_id=random.randint(1, 999999)
-                )
-            else:
-                vk.messages.send(
-                    user_id=user_id,
-                    message="Нет доступа",
-                    random_id=random.randint(1, 999999)
-                )
+@app.post("/yookassa")
+async def yookassa_webhook(request: Request):
+    data = await request.json()
 
-        # =========================
-        # Изменение цены (кнопка)
-        # =========================
+    if data["event"] == "payment.succeeded":
+        payment_id = data["object"]["id"]
 
-        elif text == "✏ Изменить цену":
-            if user_id in ADMINS:
-                vk.messages.send(
-                    user_id=user_id,
-                    message="Введите: Цена ID Новая_цена\nПример: Цена 1 2990",
-                    random_id=random.randint(1, 999999)
-                )
+        update_payment_status(payment_id, "succeeded")
 
-        # =========================
-        # Команда смены цены
-        # =========================
+        # тут позже добавим выдачу PDF
 
-        elif text.startswith("Цена"):
-            if user_id in ADMINS:
-                try:
-                    parts = text.split()
-                    course_id = int(parts[1])
-                    new_price = int(parts[2])
-
-                    update_price(course_id, new_price)
-
-                    vk.messages.send(
-                        user_id=user_id,
-                        message="✅ Цена обновлена",
-                        random_id=random.randint(1, 999999)
-                    )
-                except:
-                    vk.messages.send(
-                        user_id=user_id,
-                        message="Ошибка формата",
-                        random_id=random.randint(1, 999999)
-                    )
-
-        # =========================
-        # Открытие курса
-        # =========================
-
-        else:
-            courses = get_courses()
-            found = False
-
-            for course in courses:
-                if text == course[1]:
-                    found = True
-                    message = f"📘 {course[1]}\n\n💰 Цена: {course[2]} руб.\n\n{course[3]}"
-
-                    vk.messages.send(
-                        user_id=user_id,
-                        message=message,
-                        keyboard=course_keyboard(course[0]).get_keyboard(),
-                        random_id=random.randint(1, 999999)
-                    )
-                    break
-
-            # =========================
-            # Покупка
-            # =========================
-
-            if text.startswith("🛒 Купить"):
-                try:
-                    course_id = int(text.split()[-1])
-
-                    for course in courses:
-                        if course[0] == course_id:
-                            pdf_path = course[4]
-
-                            upload = vk_api.VkUpload(vk_session)
-                            doc = upload.document_message(pdf_path, peer_id=user_id)
-
-                            attachment = f"doc{doc['doc']['owner_id']}_{doc['doc']['id']}"
-
-                            vk.messages.send(
-                                user_id=user_id,
-                                message="Спасибо за покупку!",
-                                attachment=attachment,
-                                random_id=random.randint(1, 999999)
-                            )
-                            break
-                except Exception as e:
-                    print("Ошибка покупки:", e)
+    return {"status": "ok"}
