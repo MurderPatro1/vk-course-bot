@@ -68,8 +68,18 @@ from fastapi.responses import PlainTextResponse
 async def vk_webhook(request: Request):
     data = await request.json()
 
-    if data["type"] == "confirmation":
-        return PlainTextResponse(VK_CONFIRMATION_TOKEN)
+    if data.get("type") == "confirmation":
+        # ВК требует plain text, а не JSON
+        return PlainTextResponse("5bb3d654")
+
+    # Дальше обработка сообщений
+    if data.get("type") == "message_new":
+        user_id = data["object"]["message"]["from_id"]
+        text = data["object"]["message"]["text"]
+
+        # Твой код обработки сообщений
+
+    return PlainTextResponse("ok")
 
     if data["type"] == "message_new":
         user_id = data["object"]["message"]["from_id"]
@@ -121,4 +131,5 @@ async def yookassa_webhook(request: Request):
         # тут позже добавим выдачу PDF
 
     return {"status": "ok"}
+
 
